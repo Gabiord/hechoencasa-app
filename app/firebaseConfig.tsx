@@ -1,10 +1,13 @@
 // Import the functions you need from the SDKs you need
 import { initializeApp } from "firebase/app";
 
-// 1. CAMBIO: Importamos estas funciones nuevas
+// Importamos estas funciones nuevas
 // @ts-ignore
 import { initializeAuth, getReactNativePersistence } from 'firebase/auth';
 import ReactNativeAsyncStorage from '@react-native-async-storage/async-storage';
+
+// Importar Firestore
+import { getFirestore } from "firebase/firestore";
 
 // Your web app's Firebase configuration
 // For Firebase JS SDK v7.20.0 and later, measurementId is optional
@@ -20,6 +23,8 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
+
+export const db = getFirestore(app);
 
 // 2. CAMBIO: En lugar de getAuth(app), usamos esto:
 export const auth = initializeAuth(app, {
