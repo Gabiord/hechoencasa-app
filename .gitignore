@@ -41,3 +41,11 @@ app-example
 # generated native folders
 /ios
 /android
+
+
+#IA
+AIConfig.ts
+
+#firebase
+app/firebaseConfig.tsx
+
