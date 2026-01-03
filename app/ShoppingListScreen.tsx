@@ -5,7 +5,7 @@ import {
 import { useFocusEffect } from '@react-navigation/native';
 
 // Importaciones de Firebase
-import { collection, getDocs, deleteDoc, doc, writeBatch } from 'firebase/firestore';
+import { collection, getDocs, writeBatch } from 'firebase/firestore';
 import { auth, db } from './firebaseConfig';
 
 export default function ShoppingListScreen() {
@@ -15,9 +15,6 @@ export default function ShoppingListScreen() {
     // Estado local para saber qué items están tachados (visual)
     const [checkedItems, setCheckedItems] = useState<Record<string, boolean>>({});
 
-
-    // useFocusEffect: Se ejecuta cada vez que entras a la pestaña "Lista"
-    // Esto asegura que si acabas de guardar una receta, la lista se actualice.
     useFocusEffect(
         useCallback(() => {
             calculateShoppingList();
@@ -30,65 +27,69 @@ export default function ShoppingListScreen() {
         if (!userId) return;
 
         try {
-            // 1. Traemos todas las recetas guardadas de este usuario
-            const querySnapshot = await getDocs(collection(db, 'users', userId, 'saved_recipes'));
+            // 1. Traemos la colección 'shopping_list'
+            const querySnapshot = await getDocs(collection(db, 'users', userId, 'shopping_list'));
 
-
-            // 2. El "Diccionario Acumulador"
-            // Aquí guardaremos temporalmente las sumas.
-            // Ejemplo visual de lo que hace: { "arroz": 4, "pollo": 1, "cebolla": 2 }
-            const totals: Record<string, number> = {};
+            // 2. Diccionario Acumulador
+            const totals: Record<string, { qty: number, unit: string }> = {};
 
             querySnapshot.forEach((doc) => {
-                const recipe = doc.data();
+                // 👇 CAMBIO IMPORTANTE:
+                // El documento YA ES el ingrediente. No hay 'recipe.ingredients'.
+                const item = doc.data(); 
 
-// Si la receta tiene ingredientes...
-                if (recipe.ingredients) {
-                    recipe.ingredients.forEach((ing: any) => {
+                if (item.name) {
+                    // Limpieza: " Harina " -> "harina"
+                    const name = item.name.toLowerCase().trim();
+                    
+                    // Intentamos sacar el número: "2 tazas" -> 2. "500g" -> 500.
+                    // Si es texto (ej: "al gusto"), parseFloat devuelve NaN, usamos 0.
+                    const qtyNumber = parseFloat(item.quantity) || 0;
+                    
+                    // (Opcional) Podríamos intentar guardar la unidad (g, kg, tazas) 
+                    // pero por simplicidad sumaremos números.
 
-                        // Limpieza de datos:
-                        // Convertimos a minúsculas para que "Arroz" y "arroz" sean lo mismo
-                        const name = ing.name.toLowerCase().trim();
-
-                        // Aseguramos que la cantidad sea un número
-                        const qty = parseFloat(ing.quantity) || 0;
-
-                        // Lógica de Suma:
-                        if (totals[name]) totals[name] += qty;
-                        else totals[name] = qty;
-                    });
+                    if (totals[name]) {
+                        totals[name].qty += qtyNumber;
+                    } else {
+                        totals[name] = { qty: qtyNumber, unit: item.quantity }; 
+                    }
                 }
             });
 
+            // 3. Convertimos a lista para FlatList
+            const listArray = Object.keys(totals).map((key, index) => {
+                const data = totals[key];
+                // Si la suma es 0 (ej: "al gusto"), mostramos el texto original
+                // Si es un número (ej: 4), mostramos el número
+                const displayQty = data.qty > 0 ? data.qty.toString() : data.unit;
 
-            // 3. Convertimos el diccionario en una lista bonita para el FlatList
-            const listArray = Object.keys(totals).map((key, index) => ({
-                id: index.toString(),
-                name: key.charAt(0).toUpperCase() + key.slice(1),
-                quantity: totals[key]
-            }));
+                return {
+                    id: index.toString(),
+                    name: key.charAt(0).toUpperCase() + key.slice(1), // Capitalizar
+                    quantity: displayQty 
+                };
+            });
 
             setIngredients(listArray);
         } catch (error) {
-            console.error("Error:", error);
+            console.error("Error cargando lista:", error);
         } finally {
             setLoading(false);
         }
     };
 
-    // FUNCIÓN 1: Tachar / Destachar item
     const toggleCheck = (name: string) => {
         setCheckedItems(prev => ({
             ...prev,
-            [name]: !prev[name] // Invierte el valor (true/false)
+            [name]: !prev[name]
         }));
     };
 
-    // FUNCIÓN 2: Vaciar Lista (Borrar recetas guardadas)
     const clearList = async () => {
         Alert.alert(
             "¿Vaciar Lista?",
-            "Esto borrará todas las recetas guardadas y limpiará tu lista de compras.",
+            "Esto borrará todos los ingredientes de la lista.",
             [
                 { text: "Cancelar", style: "cancel" },
                 { 
@@ -100,18 +101,16 @@ export default function ShoppingListScreen() {
                         if (!userId) return;
 
                         try {
-                            // Obtenemos todas las recetas guardadas
-                            const querySnapshot = await getDocs(collection(db, 'users', userId, 'saved_recipes'));
+                            // 👇 CORRECCIÓN: Apuntamos a 'shopping_list', no 'saved_recipes'
+                            const querySnapshot = await getDocs(collection(db, 'users', userId, 'shopping_list'));
                             
-                            // Usamos un 'Batch' para borrar todas juntas (más eficiente)
                             const batch = writeBatch(db);
                             querySnapshot.forEach((documento) => {
                                 batch.delete(documento.ref);
                             });
 
-                            await batch.commit(); // Ejecutar borrado
+                            await batch.commit();
                             
-                            // Limpiamos estados locales
                             setIngredients([]);
                             setCheckedItems({});
                             Alert.alert("Lista Limpia", "¡Listo para la próxima compra! 🧹");
@@ -133,11 +132,10 @@ export default function ShoppingListScreen() {
 
     return (
         <View style={styles.container}>
-            {/* Header con botón de Basura */}
             <View style={styles.header}>
                 <View>
                     <Text style={styles.title}>Lista de Compras 🛒</Text>
-                    <Text style={styles.subtitle}>{ingredients.length} productos</Text>
+                    <Text style={styles.subtitle}>{ingredients.length} productos pendientes</Text>
                 </View>
                 
                 {ingredients.length > 0 && (
@@ -150,11 +148,13 @@ export default function ShoppingListScreen() {
             <FlatList
                 data={ingredients}
                 keyExtractor={(item) => item.id}
-                contentContainerStyle={{ paddingBottom: 5 }}
+                contentContainerStyle={{ paddingBottom: 50 }}
+                showsVerticalScrollIndicator={false}
                 ListEmptyComponent={
                     <View style={styles.emptyContainer}>
-                        <Text style={styles.emptyText}>¡Todo listo!</Text>
-                        <Text style={styles.emptySubText}>No hay pendientes por comprar.</Text>
+                        <Text style={{fontSize: 40}}>📝</Text>
+                        <Text style={styles.emptyText}>Tu lista está vacía</Text>
+                        <Text style={styles.emptySubText}>Añade ingredientes desde tus recetas.</Text>
                     </View>
                 }
                 renderItem={({ item }) => {
@@ -168,7 +168,6 @@ export default function ShoppingListScreen() {
                                 {item.name}
                             </Text>
                             
-                            {/* Si está checkeado mostramos un ✅, si no, la cantidad */}
                             <View style={[styles.badge, isChecked && styles.badgeChecked]}>
                                 <Text style={[styles.qty, isChecked && styles.textChecked]}>
                                     {isChecked ? "✅" : item.quantity}
@@ -193,25 +192,24 @@ const styles = StyleSheet.create({
     clearButton: { backgroundColor: '#ffebe6', padding: 10, borderRadius: 8 },
     clearButtonText: { color: '#FF3B30', fontWeight: 'bold' },
 
-    // Row Styles
     row: {
         backgroundColor: '#fff', padding: 16, marginBottom: 12, borderRadius: 12,
         flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
         elevation: 2, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.05,
     },
-    rowChecked: { backgroundColor: '#f0f0f0', elevation: 0 }, // Estilo cuando está tachado
+    rowChecked: { backgroundColor: '#f0f0f0', elevation: 0 }, 
     
-    name: { fontSize: 18, color: '#444', fontWeight: '500' },
-    textChecked: { textDecorationLine: 'line-through', color: '#aaa' }, // Efecto tachado
+    name: { fontSize: 18, color: '#444', fontWeight: '500', textTransform: 'capitalize' },
+    textChecked: { textDecorationLine: 'line-through', color: '#aaa' },
 
     badge: { 
         backgroundColor: '#fff0e0', paddingHorizontal: 12, paddingVertical: 6, 
         borderRadius: 8, minWidth: 40, alignItems: 'center' 
     },
     badgeChecked: { backgroundColor: 'transparent' },
-    qty: { fontSize: 18, fontWeight: 'bold', color: '#FF6B00' },
+    qty: { fontSize: 16, fontWeight: 'bold', color: '#FF6B00' },
 
-    emptyContainer: { alignItems: 'center', marginTop: 50 },
-    emptyText: { fontSize: 20, fontWeight: 'bold', color: '#ccc' },
-    emptySubText: { fontSize: 16, color: '#999', marginTop: 10 },
+    emptyContainer: { alignItems: 'center', marginTop: 100 },
+    emptyText: { fontSize: 20, fontWeight: 'bold', color: '#ccc', marginTop: 10 },
+    emptySubText: { fontSize: 16, color: '#999', marginTop: 5 },
 });

@@ -3,222 +3,268 @@ import {
   View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Alert, ActivityIndicator, Image 
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
-import { Ionicons } from '@expo/vector-icons'; // Usamos iconos para que se vea mejor
+import { Ionicons } from '@expo/vector-icons'; 
 
-// 1. IMPORTACIONES DE IMAGEN Y STORAGE
+// Imágenes y Firebase
 import * as ImagePicker from 'expo-image-picker';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { collection, addDoc, doc, getDoc } from 'firebase/firestore';
+import { collection, addDoc } from 'firebase/firestore'; // Ya no necesitamos getDoc de usuario
 import { auth, db, storage } from './firebaseConfig';
+
+// Importamos la clave
+import { GEMINI_API_KEY } from "../AIConfig";
 
 export default function AddRecipeScreen() {
   const navigation = useNavigation<any>();
-  const [loading, setLoading] = useState(false);
-  const [uploading, setUploading] = useState(false);
-
-  // Estados Principales
-  const [name, setName] = useState('');
-  const [imageUri, setImageUri] = useState<string | null>(null); // Guardamos la ruta local del celular
-  const [category, setCategory] = useState('Almuerzo');
   
-  // Listas Dinámicas
+  // ESTADOS DE UI
+  const [mode, setMode] = useState<'input' | 'preview'>('input'); // 'input' = Pegar texto, 'preview' = Ver resultado
+  const [aiLoading, setAiLoading] = useState(false);
+  const [saveLoading, setSaveLoading] = useState(false);
+
+  // INPUT INICIAL
+  const [rawText, setRawText] = useState('');
+
+  // DATOS DE LA RECETA (Resultado)
+  const [name, setName] = useState('');
+  const [category, setCategory] = useState('Almuerzo');
   const [ingredients, setIngredients] = useState<any[]>([]);
-  const [tempIngName, setTempIngName] = useState('');
-  const [tempIngQty, setTempIngQty] = useState('');
-
   const [steps, setSteps] = useState<any[]>([]);
-  const [tempStep, setTempStep] = useState('');
+  const [imageUri, setImageUri] = useState<string | null>(null);
 
-  // --- FUNCIÓN 1: ELEGIR FOTO ---
+// --- FUNCIÓN FINAL: USANDO GEMINI 1.5 FLASH (EL ESTÁNDAR GRATUITO) ⚡ ---
+const generateRecipeWithAI = async () => {
+  if (!rawText.trim()) {
+    Alert.alert("Texto vacío", "Por favor pega la descripción de una receta.");
+    return;
+  }
+
+  setAiLoading(true);
+
+  try {
+    console.log("Conectando con Gemini 1.5 Flash...");
+
+    // CAMBIO AQUÍ: Usamos 'gemini-1.5-flash' que es el modelo gratuito por excelencia
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts: [{ text: `
+          Actúa como un asistente de cocina experto (API JSON).
+          Tu tarea es convertir este texto desordenado en una receta JSON estructurada.
+          
+          Texto: "${rawText}"
+
+          REGLAS OBLIGATORIAS:
+          1. Devuelve SOLAMENTE un objeto JSON válido.
+          2. NO uses bloques de código markdown (\`\`\`).
+          3. Si faltan datos, infiérelos lógicamente.
+
+          Estructura requerida:
+          {
+            "name": "Título del plato",
+            "category": "Almuerzo",
+            "ingredients": [{"name": "ingrediente", "quantity": "cantidad"}],
+            "steps": [{"step": "1", "text": "instrucción"}]
+          }
+          *Categoría debe ser: Desayuno, Almuerzo, Cena, Postre o Snack.
+        ` }] }] })
+      }
+    );
+
+    const data = await response.json();
+
+    // Validación de errores de Google
+    if (data.error) {
+        console.error("Error Google:", data.error);
+        Alert.alert("Error de Google", `Código: ${data.error.code}\n${data.error.message}`);
+        return;
+    }
+
+    if (data.candidates && data.candidates.length > 0 && data.candidates[0].content) {
+      let aiText = data.candidates[0].content.parts[0].text;
+      
+      // Limpieza de seguridad
+      aiText = aiText.replace(/```json/g, '').replace(/```/g, '').trim();
+      
+      try {
+          const recipeJson = JSON.parse(aiText);
+          
+          setName(recipeJson.name || "Receta Importada");
+          setCategory(recipeJson.category || 'Almuerzo');
+          
+          const cleanIngredients = (recipeJson.ingredients || []).map((ing: any, i: number) => ({
+              name: ing.name, 
+              quantity: ing.quantity || '', 
+              id: i.toString()
+          }));
+
+          const cleanSteps = (recipeJson.steps || []).map((st: any, i: number) => ({
+              name: st.text, 
+              step: (i+1).toString()
+          }));
+
+          setIngredients(cleanIngredients);
+          setSteps(cleanSteps);
+          setMode('preview');
+
+      } catch (jsonError) {
+          console.error("Error JSON:", aiText);
+          Alert.alert("Error de Formato", "La IA respondió pero falló el formato. Intenta de nuevo.");
+      }
+
+    } else {
+      Alert.alert("Sin respuesta", "La IA no devolvió resultados.");
+    }
+
+  } catch (error: any) {
+    console.error(error);
+    Alert.alert("Error de Conexión", error.message);
+  } finally {
+    setAiLoading(false);
+  }
+};
+
+  // --- 2. FUNCIÓN: GUARDAR EN PRIVADO 🔒 ---
+  const handleSaveRecipe = async () => {
+      setSaveLoading(true);
+      const user = auth.currentUser;
+      if (!user) return;
+
+      try {
+          let finalPhotoURL = "https://cdn-icons-png.flaticon.com/512/3565/3565418.png"; // Icono por defecto
+
+          // Si el usuario subió foto, la guardamos
+          if (imageUri) {
+             const response = await fetch(imageUri);
+             const blob = await response.blob();
+             const filename = `recipes/${user.uid}_${Date.now()}.jpg`;
+             const storageRef = ref(storage, filename);
+             await uploadBytes(storageRef, blob);
+             finalPhotoURL = await getDownloadURL(storageRef);
+          }
+
+          // Guardamos en la colección PRIVADA
+          // users -> UID -> my_recipes
+          const newRecipe = {
+              name: name,
+              image: { uri: finalPhotoURL },
+              category: category,
+              rate: "5",
+              ingredients: ingredients,
+              procedure: steps,
+              createdAt: new Date()
+          };
+
+          await addDoc(collection(db, `users/${user.uid}/my_recipes`), newRecipe);
+
+          Alert.alert("¡Guardado!", "Receta añadida a tu colección personal.");
+          navigation.goBack();
+
+      } catch (error) {
+          console.error(error);
+          Alert.alert("Error", "No se pudo guardar la receta.");
+      } finally {
+          setSaveLoading(false);
+      }
+  };
+
+  // --- UI: ELEGIR FOTO ---
   const pickImage = async () => {
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: true,
-      aspect: [4, 3], // Formato rectangular para comida
-      quality: 0.5,
+      mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsEditing: true, aspect: [4, 3], quality: 0.5,
     });
-
-    if (!result.canceled) {
-      setImageUri(result.assets[0].uri);
-    }
+    if (!result.canceled) setImageUri(result.assets[0].uri);
   };
 
-  // --- FUNCIÓN 2: SUBIR FOTO A STORAGE ---
-  const uploadImageToStorage = async (localUri: string) => {
-    try {
-      const response = await fetch(localUri);
-      const blob = await response.blob();
-      
-      // Creamos un nombre único usando la fecha actual
-      const filename = `recipes/${auth.currentUser?.uid}_${Date.now()}.jpg`;
-      const storageRef = ref(storage, filename);
-
-      await uploadBytes(storageRef, blob);
-      const downloadURL = await getDownloadURL(storageRef);
-      return downloadURL;
-    } catch (error) {
-      console.error("Error subiendo imagen:", error);
-      throw error;
-    }
-  };
-
-  // --- FUNCIONES DE INGREDIENTES Y PASOS (IGUAL QUE ANTES) ---
-  const addIngredient = () => {
-    if (!tempIngName.trim() || !tempIngQty.trim()) return;
-    setIngredients([...ingredients, { id: Date.now().toString(), name: tempIngName.trim(), quantity: tempIngQty.trim() }]);
-    setTempIngName(''); setTempIngQty('');
-  };
-
-  const removeIngredient = (id: string) => setIngredients(ingredients.filter(ing => ing.id !== id));
-
-  const addStep = () => {
-    if (!tempStep.trim()) return;
-    const newStep = { step: (steps.length + 1).toString(), name: tempStep.trim() };
-    setSteps([...steps, newStep]);
-    setTempStep('');
-  };
-
-  const removeStep = (indexToRemove: number) => {
-      const newSteps = steps.filter((_, index) => index !== indexToRemove);
-      setSteps(newSteps.map((s, i) => ({ ...s, step: (i + 1).toString() })));
-  };
-
-  // --- GUARDAR TODO ---
-  const handleSaveRecipe = async () => {
-    if (!name || !imageUri || ingredients.length === 0 || steps.length === 0) {
-      Alert.alert("Faltan datos", "Asegúrate de poner nombre, foto, ingredientes y pasos.");
-      return;
-    }
-
-    setLoading(true);
-    setUploading(true); // Para mostrar mensaje de "Subiendo foto..."
-
-    try {
-        const user = auth.currentUser;
-        if (!user) return;
-
-        // 1. PRIMERO SUBIMOS LA FOTO
-        const finalPhotoURL = await uploadImageToStorage(imageUri);
-
-        // 2. OBTENEMOS NOMBRE DEL CHEF
-        let chefName = "Chef Anónimo";
-        const userDoc = await getDoc(doc(db, "users", user.uid));
-        if (userDoc.exists()) {
-             chefName = userDoc.data().displayName || chefName;
-        }
-
-        // 3. GUARDAMOS LA RECETA EN FIRESTORE
-        const newRecipe = {
-            name: name.trim(),
-            image: { uri: finalPhotoURL }, // Usamos la URL de Firebase
-            category: category,
-            chef: chefName,
-            creatorUid: user.uid,
-            rate: "5",
-            ingredients: ingredients,
-            procedure: steps,
-            createdAt: new Date()
-        };
-
-        await addDoc(collection(db, "recipes"), newRecipe);
-
-        Alert.alert("¡Éxito! 🎉", "Tu receta se ha publicado correctamente.");
-        navigation.goBack();
-
-    } catch (error) {
-        console.error(error);
-        Alert.alert("Error", "Ocurrió un problema al subir la receta.");
-    } finally {
-        setLoading(false);
-        setUploading(false);
-    }
-  };
-
+  // --- RENDERIZADO ---
   return (
     <View style={styles.container}>
       <ScrollView contentContainerStyle={styles.scrollContent}>
-        <Text style={styles.title}>Nueva Receta 🥘</Text>
-
-        {/* --- SECCIÓN DE FOTO --- */}
-        <View style={styles.imageSection}>
-            <TouchableOpacity onPress={pickImage} style={styles.imagePicker}>
-                {imageUri ? (
-                    <Image source={{ uri: imageUri }} style={styles.previewImage} />
-                ) : (
-                    <View style={styles.placeholder}>
-                        <Ionicons name="camera" size={40} color="#ccc" />
-                        <Text style={styles.placeholderText}>Toca para subir foto</Text>
-                    </View>
-                )}
-            </TouchableOpacity>
-            {/* Si ya hay foto, permitimos cambiarla */}
-            {imageUri && <Text style={styles.changePhotoText}>Toca la imagen para cambiarla</Text>}
-        </View>
-
-        {/* DATOS BÁSICOS */}
-        <Text style={styles.sectionTitle}>Nombre del plato</Text>
-        <TextInput style={styles.input} placeholder="Ej: Tarta de Manzana" value={name} onChangeText={setName} />
         
-        <Text style={styles.sectionTitle}>Categoría</Text>
-        <View style={styles.row}>
-            {['Almuerzo', 'Cena', 'Postre'].map(cat => (
-                <TouchableOpacity 
-                    key={cat} 
-                    style={[styles.catBadge, category === cat && styles.catBadgeSelected]}
-                    onPress={() => setCategory(cat)}
-                >
-                    <Text style={[styles.catText, category === cat && styles.catTextSelected]}>{cat}</Text>
-                </TouchableOpacity>
-            ))}
-        </View>
+        {mode === 'input' ? (
+            // --- VISTA 1: IMPORTADOR ---
+            <View>
+                <Text style={styles.title}>Importar con IA ✨</Text>
+                <Text style={styles.subtitle}>
+                    Copia la descripción de un video de TikTok, Instagram o un blog, y pégala aquí. La IA hará el resto.
+                </Text>
 
-        {/* INGREDIENTES */}
-        <Text style={styles.sectionTitle}>Ingredientes ({ingredients.length})</Text>
-        <View style={styles.addSection}>
-            <TextInput style={[styles.input, { flex: 1, marginRight: 5 }]} placeholder="Ingrediente" value={tempIngName} onChangeText={setTempIngName} />
-            <TextInput style={[styles.input, { width: 80, marginRight: 5 }]} placeholder="Cant." value={tempIngQty} onChangeText={setTempIngQty} />
-            <TouchableOpacity style={styles.addButton} onPress={addIngredient}>
-                <Ionicons name="add" size={24} color="white" />
-            </TouchableOpacity>
-        </View>
-        {ingredients.map((ing) => (
-            <View key={ing.id} style={styles.listItem}>
-                <Text style={{flex: 1}}>• {ing.quantity} {ing.name}</Text>
-                <TouchableOpacity onPress={() => removeIngredient(ing.id)}>
-                    <Ionicons name="close-circle" size={20} color="red" />
-                </TouchableOpacity>
-            </View>
-        ))}
+                <TextInput 
+                    style={styles.textArea} 
+                    multiline 
+                    placeholder="Pega aquí el texto de la receta... Ej: 'Para hacer torta de chocolate necesitas 2 huevos...'"
+                    value={rawText}
+                    onChangeText={setRawText}
+                    numberOfLines={8}
+                    textAlignVertical="top"
+                />
 
-        {/* PASOS */}
-        <Text style={styles.sectionTitle}>Pasos ({steps.length})</Text>
-        <View style={styles.addSection}>
-            <TextInput style={[styles.input, { flex: 1, marginRight: 5 }]} placeholder="Describe el paso..." value={tempStep} onChangeText={setTempStep} />
-            <TouchableOpacity style={styles.addButton} onPress={addStep}>
-                <Ionicons name="add" size={24} color="white" />
-            </TouchableOpacity>
-        </View>
-        {steps.map((step, index) => (
-            <View key={index} style={styles.listItem}>
-                <Text style={{fontWeight: 'bold', color: '#FF6B00', marginRight: 5}}>{step.step}.</Text>
-                <Text style={{flex: 1}}>{step.name}</Text>
-                <TouchableOpacity onPress={() => removeStep(index)}>
-                    <Ionicons name="close-circle" size={20} color="red" />
+                <TouchableOpacity style={styles.aiButton} onPress={generateRecipeWithAI} disabled={aiLoading}>
+                    {aiLoading ? (
+                        <ActivityIndicator color="#fff" />
+                    ) : (
+                        <View style={{flexDirection: 'row', alignItems: 'center'}}>
+                            <Ionicons name="sparkles" size={24} color="white" style={{marginRight: 10}} />
+                            <Text style={styles.buttonText}>Analizar Receta</Text>
+                        </View>
+                    )}
                 </TouchableOpacity>
             </View>
-        ))}
+        ) : (
+            // --- VISTA 2: REVISIÓN ---
+            <View>
+                <Text style={styles.title}>Resultado 🍳</Text>
+                
+                {/* FOTO */}
+                <TouchableOpacity onPress={pickImage} style={styles.imagePicker}>
+                    {imageUri ? (
+                        <Image source={{ uri: imageUri }} style={styles.previewImage} />
+                    ) : (
+                        <View style={styles.placeholder}>
+                            <Ionicons name="camera" size={40} color="#FF6B00" />
+                            <Text style={styles.placeholderText}>+ Añadir foto (Opcional)</Text>
+                        </View>
+                    )}
+                </TouchableOpacity>
 
-        {/* BOTÓN GUARDAR */}
-        <TouchableOpacity style={styles.saveButton} onPress={handleSaveRecipe} disabled={loading}>
-            {loading ? (
-                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                    <ActivityIndicator color="#fff" style={{ marginRight: 10 }} />
-                    <Text style={styles.saveButtonText}>{uploading ? "Subiendo Receta... ": "Guardando..."}</Text>
+                {/* EDITAR NOMBRE */}
+                <Text style={styles.label}>Nombre:</Text>
+                <TextInput style={styles.input} value={name} onChangeText={setName} />
+
+                {/* CATEGORÍA */}
+                <Text style={styles.label}>Categoría detectada:</Text>
+                <View style={styles.catBadge}>
+                    <Text style={styles.catText}>{category}</Text>
                 </View>
-            ) : (
-                <Text style={styles.saveButtonText}>PUBLICAR RECETA 🚀</Text>
-            )}
-        </TouchableOpacity>
+
+                {/* LISTAS */}
+                <Text style={styles.label}>Ingredientes ({ingredients.length}):</Text>
+                <View style={styles.listContainer}>
+                    {ingredients.map((ing) => (
+                        <Text key={ing.id} style={styles.listItem}>• {ing.quantity} {ing.name}</Text>
+                    ))}
+                </View>
+
+                <Text style={styles.label}>Pasos ({steps.length}):</Text>
+                <View style={styles.listContainer}>
+                    {steps.map((st, i) => (
+                        <Text key={i} style={styles.listItem}>{st.step}. {st.name}</Text>
+                    ))}
+                </View>
+
+                <View style={styles.rowButtons}>
+                    <TouchableOpacity style={styles.cancelButton} onPress={() => setMode('input')}>
+                        <Text style={styles.cancelText}>Reintentar</Text>
+                    </TouchableOpacity>
+                    
+                    <TouchableOpacity style={styles.saveButton} onPress={handleSaveRecipe} disabled={saveLoading}>
+                        {saveLoading ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Guardar en mi Libro</Text>}
+                    </TouchableOpacity>
+                </View>
+            </View>
+        )}
 
       </ScrollView>
     </View>
@@ -226,35 +272,42 @@ export default function AddRecipeScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#f9f9f9' },
-  scrollContent: { padding: 20, paddingBottom: 50 },
-  title: { fontSize: 26, fontWeight: 'bold', marginBottom: 20, textAlign: 'center', color: '#333' },
-  sectionTitle: { fontSize: 16, fontWeight: 'bold', marginTop: 15, marginBottom: 8, color: '#555' },
+  container: { flex: 1, backgroundColor: '#fff' },
+  scrollContent: { padding: 25, paddingBottom: 50 },
   
-  // Estilos de Imagen
-  imageSection: { alignItems: 'center', marginBottom: 10 },
-  imagePicker: { 
-      width: '100%', height: 200, backgroundColor: '#e1e1e1', borderRadius: 12, 
-      justifyContent: 'center', alignItems: 'center', overflow: 'hidden', borderWidth: 1, borderColor: '#ccc', borderStyle: 'dashed'
+  title: { fontSize: 28, fontWeight: 'bold', color: '#333', textAlign: 'center', marginBottom: 10 },
+  subtitle: { fontSize: 14, color: '#666', textAlign: 'center', marginBottom: 20, lineHeight: 20 },
+  
+  textArea: { 
+      backgroundColor: '#f5f5f5', borderRadius: 15, padding: 15, height: 200, fontSize: 16, 
+      borderWidth: 1, borderColor: '#e0e0e0', marginBottom: 20 
   },
-  previewImage: { width: '100%', height: '100%' },
+  aiButton: { 
+      backgroundColor: '#8E44AD', padding: 18, borderRadius: 12, alignItems: 'center', 
+      elevation: 4, shadowColor: '#8E44AD', shadowOffset: {width: 0, height: 4}, shadowOpacity: 0.3 
+  },
+
+  // Estilos de Preview
+  imagePicker: { 
+      height: 180, backgroundColor: '#FFF5E6', borderRadius: 12, marginBottom: 20,
+      justifyContent: 'center', alignItems: 'center', borderStyle: 'dashed', borderWidth: 2, borderColor: '#FF6B00' 
+  },
+  previewImage: { width: '100%', height: '100%', borderRadius: 10 },
   placeholder: { alignItems: 'center' },
-  placeholderText: { color: '#888', marginTop: 5, fontWeight: '600' },
-  changePhotoText: { color: '#007AFF', fontSize: 12, marginTop: 5 },
+  placeholderText: { color: '#FF6B00', fontWeight: 'bold', marginTop: 5 },
 
-  input: { backgroundColor: '#fff', padding: 12, borderRadius: 8, marginBottom: 5, borderWidth: 1, borderColor: '#eee' },
+  label: { fontSize: 16, fontWeight: 'bold', color: '#333', marginTop: 15, marginBottom: 5 },
+  input: { fontSize: 18, borderBottomWidth: 1, borderColor: '#ddd', paddingBottom: 5, color: '#333' },
   
-  row: { flexDirection: 'row', marginBottom: 10 },
-  catBadge: { padding: 8, backgroundColor: '#eee', borderRadius: 20, marginRight: 10 },
-  catBadgeSelected: { backgroundColor: '#FF6B00' },
-  catText: { color: '#666' },
-  catTextSelected: { color: '#fff', fontWeight: 'bold' },
+  catBadge: { alignSelf: 'flex-start', backgroundColor: '#eee', paddingHorizontal: 15, paddingVertical: 5, borderRadius: 20 },
+  catText: { color: '#555', fontWeight: '600' },
 
-  addSection: { flexDirection: 'row', marginBottom: 10 },
-  addButton: { backgroundColor: '#34C759', width: 50, justifyContent: 'center', alignItems: 'center', borderRadius: 8 },
+  listContainer: { backgroundColor: '#f9f9f9', padding: 15, borderRadius: 10 },
+  listItem: { fontSize: 14, color: '#444', marginBottom: 6, lineHeight: 20 },
 
-  listItem: { flexDirection: 'row', backgroundColor: '#fff', padding: 10, borderRadius: 8, marginBottom: 5, alignItems: 'center', elevation: 1 },
-
-  saveButton: { backgroundColor: '#FF6B00', padding: 15, borderRadius: 10, alignItems: 'center', marginTop: 30 },
-  saveButtonText: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
+  rowButtons: { flexDirection: 'row', marginTop: 30, justifyContent: 'space-between' },
+  cancelButton: { padding: 15, flex: 1, alignItems: 'center' },
+  cancelText: { color: '#666', fontWeight: 'bold' },
+  saveButton: { backgroundColor: '#FF6B00', flex: 2, padding: 15, borderRadius: 12, alignItems: 'center', marginLeft: 10 },
+  buttonText: { color: '#fff', fontSize: 16, fontWeight: 'bold' }
 });

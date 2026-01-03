@@ -7,7 +7,7 @@ import { useFocusEffect, useNavigation } from '@react-navigation/native';
 // Firebase
 import { auth, db } from './firebaseConfig';
 import { signOut } from 'firebase/auth';
-import { collection, getDocs, doc, getDoc, query, where } from 'firebase/firestore';
+import { collection, getDocs, doc, getDoc } from 'firebase/firestore'; // Ya no necesitamos query/where
 
 export default function ProfileScreen() {
   const navigation = useNavigation<any>();
@@ -17,7 +17,6 @@ export default function ProfileScreen() {
   const [userProfile, setUserProfile] = useState<any>(null); 
   const [loading, setLoading] = useState(true);
 
-  // Se ejecuta cada vez que entras a la pantalla (para refrescar foto y datos)
   useFocusEffect(
     useCallback(() => {
       fetchData();
@@ -28,7 +27,7 @@ export default function ProfileScreen() {
     if (!user) return;
 
     try {
-      // 1. CARGAR DATOS DEL PERFIL (Nombre, Foto, Bio)
+      // 1. DATOS DEL PERFIL (Igual que antes)
       const userDocRef = doc(db, "users", user.uid);
       const userDocSnap = await getDoc(userDocRef);
       
@@ -36,15 +35,13 @@ export default function ProfileScreen() {
         setUserProfile(userDocSnap.data());
       }
 
-      // 2. CARGAR MIS RECETAS REALES (Filtradas por ID)
-      const q = query(
-          collection(db, "recipes"), 
-          where("creatorUid", "==", user.uid)
-      );
-
-      const querySnapshot = await getDocs(q);
-      const recipesList: any[] = [];
+      // 2. RECETAS PRIVADAS (EL CAMBIO 🔄)
+      // Antes: collection 'recipes' (público)
+      // Ahora: users -> UID -> my_recipes
+      const privateRecipesRef = collection(db, `users/${user.uid}/my_recipes`);
+      const querySnapshot = await getDocs(privateRecipesRef);
       
+      const recipesList: any[] = [];
       querySnapshot.forEach((doc) => {
         recipesList.push({ ...doc.data(), uid: doc.id });
       });
@@ -70,14 +67,11 @@ export default function ProfileScreen() {
   }
 
   const renderHeader = () => {
-    // PREPARACIÓN DE DATOS
     const displayName = userProfile?.displayName || user?.email?.split('@')[0];
     const username = userProfile?.username ? `@${userProfile.username}` : '';
-    const accountType = userProfile?.accountType || 'Chef';
-    const location = userProfile?.location || '';
+    // Si no hay bio, mostramos un mensaje invitando a usar la IA
+    const bio = userProfile?.bio || "Guardando mis recetas favoritas con IA 🤖🍳";
     
-    // 👇 AQUÍ ESTÁ LA CORRECCIÓN CLAVE:
-    // Si existe photoURL en Firebase, la usamos. Si no, usamos la genérica.
     const profileImage = userProfile?.photoURL 
         ? { uri: userProfile.photoURL }
         : { uri: 'https://cdn-icons-png.flaticon.com/512/847/847969.png' };
@@ -85,42 +79,30 @@ export default function ProfileScreen() {
     return (
       <View style={styles.headerContainer}>
           <View style={styles.topRow}>
-              {/* FOTO DINÁMICA */}
               <Image source={profileImage} style={styles.profilePic} />
               
-              {/* ESTADÍSTICAS */}
               <View style={styles.statsContainer}>
                   <View style={styles.statItem}>
                       <Text style={styles.statNumber}>{myRecipes.length}</Text>
-                      <Text style={styles.statLabel}>Recetas</Text>
+                      <Text style={styles.statLabel}>Guardadas</Text>
                   </View>
+                  {/* Quitamos Seguidores/Seguidos porque ahora es un libro personal */}
                   <View style={styles.statItem}>
-                      <Text style={styles.statNumber}>0</Text>
-                      <Text style={styles.statLabel}>Seguidores</Text>
-                  </View>
-                  <View style={styles.statItem}>
-                      <Text style={styles.statNumber}>0</Text>
-                      <Text style={styles.statLabel}>Seguidos</Text>
+                      <Text style={styles.statNumber}>IA</Text>
+                      <Text style={styles.statLabel}>Potenciado</Text>
                   </View>
               </View>
           </View>
 
-          {/* DATOS DE TEXTO */}
           <View style={styles.nameContainer}>
             <Text style={styles.userName}>{displayName}</Text>
-            <View style={styles.typeBadge}>
-               <Text style={styles.typeText}>{accountType}</Text>
-            </View>
           </View>
           
           <Text style={styles.userHandle}>{username}</Text>
-          {location !== '' && <Text style={styles.location}>📍 {location}</Text>}
+          {userProfile?.location && <Text style={styles.location}>📍 {userProfile.location}</Text>}
 
-          <Text style={styles.userBio}>
-            {userProfile?.bio || "Aún no has escrito una biografía. ¡Dale a editar!"}
-          </Text>
+          <Text style={styles.userBio}>{bio}</Text>
           
-          {/* BOTONES */}
           <View style={styles.actionButtonsContainer}>
                <TouchableOpacity 
                   style={styles.editButton}
@@ -129,11 +111,11 @@ export default function ProfileScreen() {
                   <Text style={styles.editButtonText}>Editar Perfil</Text>
               </TouchableOpacity>
               <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
-                  <Text style={styles.logoutButtonText}>Cerrar Sesión</Text>
+                  <Text style={styles.logoutButtonText}>Salir</Text>
               </TouchableOpacity>
           </View>
          
-         <Text style={styles.sectionTitle}>Mis Creaciones 👨‍🍳</Text>
+         <Text style={styles.sectionTitle}>Mi Colección ({myRecipes.length})</Text>
       </View>
     );
   };
@@ -160,16 +142,14 @@ export default function ProfileScreen() {
         ListHeaderComponent={renderHeader}
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
-        
-        // Estado Vacío (Si no tienes recetas)
         ListEmptyComponent={
             <View style={{ alignItems: 'center', marginTop: 40, padding: 20 }}>
-              <Text style={{ fontSize: 40 }}>🍲</Text>
+              <Text style={{ fontSize: 40 }}>🤖</Text>
               <Text style={{ fontSize: 16, color: '#666', fontWeight: 'bold', marginTop: 10 }}>
-                Aún no has subido recetas
+                Aún no tienes recetas
               </Text>
               <Text style={{ fontSize: 14, color: '#999', textAlign: 'center', marginTop: 5 }}>
-                Tus platos aparecerán aquí.
+                Ve al botón (+) para importar una receta mágica.
               </Text>
             </View>
         }
@@ -186,7 +166,6 @@ const styles = StyleSheet.create({
   headerContainer: { padding: 20, paddingTop: 60, backgroundColor: '#fff' },
   topRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 15 },
   
-  // Foto de perfil
   profilePic: { 
       width: 80, height: 80, borderRadius: 40, marginRight: 20, 
       borderWidth: 2, borderColor: '#FF6B00', backgroundColor: '#eee' 
@@ -198,9 +177,7 @@ const styles = StyleSheet.create({
   statLabel: { fontSize: 12, color: '#666' },
   
   nameContainer: { flexDirection: 'row', alignItems: 'center', marginBottom: 2 },
-  userName: { fontSize: 18, fontWeight: 'bold', color: '#333', marginRight: 8 },
-  typeBadge: { backgroundColor: '#FF6B00', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
-  typeText: { color: '#fff', fontSize: 10, fontWeight: 'bold', textTransform: 'uppercase' },
+  userName: { fontSize: 20, fontWeight: 'bold', color: '#333', marginRight: 8 },
 
   userHandle: { fontSize: 14, color: '#666', marginBottom: 4 },
   location: { fontSize: 14, color: '#444', marginBottom: 8 },
