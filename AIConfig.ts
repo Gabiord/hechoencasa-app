@@ -1,2 +1,2 @@
-export const GEMINI_API_KEY = "AIzaSyAjkz07S2BgTBIqqVmb1SZDN8F5Nx7yqtU"
-
+import { GEMINI_API_KEY as KEY } from '@env';
+export const GEMINI_API_KEY = KEY;

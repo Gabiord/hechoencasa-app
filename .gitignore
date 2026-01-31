@@ -49,3 +49,6 @@ AIConfig.ts
 #firebase
 app/firebaseConfig.tsx
 
+# Archivos de entorno 
+.env
+.env.local
